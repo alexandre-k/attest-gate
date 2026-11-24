@@ -1,0 +1,13 @@
+/target/
+firebase-sa.json
+*service-account*.json
+*.sa.json
+k8s/*.json
+k8s/secret.yaml
+k8s/*-secret.yaml
+*.jks
+*.keystore
+.env
+k8s/secret.yaml
+k8s/*.json
+*.json

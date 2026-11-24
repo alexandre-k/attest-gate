@@ -1,0 +1,7 @@
+target/
+.git/
+clients/
+k8s/
+*.log
+*.json
+!Cargo.lock
