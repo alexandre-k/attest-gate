@@ -64,6 +64,7 @@ struct CustomAppCheckClaims<'a> {
 #[serde(rename_all = "camelCase")]
 struct ExchangeCustomTokenRequest<'a> {
     custom_token: &'a str,
+    limited_use: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,7 +96,12 @@ impl FirebaseClient {
     }
 
     /// Exchanges a newly signed RS256 custom JWT for an official Firebase App Check token.
-    pub async fn exchange_app_check_token(&self) -> Result<MintedAppCheckToken> {
+    ///
+    /// When `limited_use` is `true`, passes `"limitedUse": true` so Google mints a single-use
+    /// limited-use token for replay-protected backends (e.g. Firebase AI Logic).
+    /// When `limited_use` is `false`, passes `"limitedUse": false` so Google mints a standard
+    /// session token (required by services such as Cloud Firestore).
+    pub async fn exchange_app_check_token(&self, limited_use: bool) -> Result<MintedAppCheckToken> {
         let bearer = self.get_or_refresh_bearer_token().await?;
         let custom_jwt = self.sign_custom_app_check_jwt()?;
 
@@ -108,6 +114,7 @@ impl FirebaseClient {
 
         let req_body = ExchangeCustomTokenRequest {
             custom_token: &custom_jwt,
+            limited_use,
         };
 
         let resp = self
@@ -141,7 +148,8 @@ impl FirebaseClient {
                 )
             })?;
 
-        let ttl_millis = parse_protobuf_duration_millis(&exchanged.ttl).unwrap_or(3600 * 1000);
+        let fallback_ttl_millis = if limited_use { 300 * 1000 } else { 3600 * 1000 };
+        let ttl_millis = parse_protobuf_duration_millis(&exchanged.ttl).unwrap_or(fallback_ttl_millis);
         let expire_time_millis = now_unix_millis().saturating_add(ttl_millis);
 
         Ok(MintedAppCheckToken {
@@ -230,8 +238,9 @@ impl FirebaseClient {
     }
 
     /// Signs an RS256 custom token JWT targeting Firebase App Check's `TokenExchangeService`.
-    /// Note: Google's `ExchangeCustomTokenRequest` proto takes `{"customToken": "..."}` while
-    /// the desired `ttl` (`"3600s"`) is embedded as a signed claim inside the custom JWT.
+    /// Note: Google's `ExchangeCustomTokenRequest` proto takes
+    /// `{"customToken": "...", "limitedUse": <bool>}` while the desired `ttl` (`"3600s"`) is
+    /// embedded as a signed claim inside the custom JWT.
     pub fn sign_custom_app_check_jwt(&self) -> Result<String> {
         let now = now_unix_secs();
         let mut header = Header::new(Algorithm::RS256);
@@ -291,5 +300,32 @@ mod tests {
         );
         assert!(parse_protobuf_duration_millis("3600").is_err());
         assert!(parse_protobuf_duration_millis("-10s").is_err());
+    }
+
+    #[test]
+    fn exchange_request_serializes_limited_use_camel_case() {
+        let limited = ExchangeCustomTokenRequest {
+            custom_token: "test-jwt",
+            limited_use: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&limited).unwrap(),
+            serde_json::json!({
+                "customToken": "test-jwt",
+                "limitedUse": true
+            })
+        );
+
+        let session = ExchangeCustomTokenRequest {
+            custom_token: "test-jwt",
+            limited_use: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&session).unwrap(),
+            serde_json::json!({
+                "customToken": "test-jwt",
+                "limitedUse": false
+            })
+        );
     }
 }

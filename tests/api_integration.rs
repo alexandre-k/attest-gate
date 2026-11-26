@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
+use axum::routing::post;
+use axum::{Json, Router};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http_body_util::BodyExt;
@@ -13,14 +15,14 @@ use rsa::RsaPrivateKey;
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tower::ServiceExt;
 
 use attest_gate::config::{Config, ProxyIpMode, ServiceAccountCredentials};
 use attest_gate::firebase::FirebaseClient;
 use attest_gate::rate_limit::IpRateLimiter;
-use attest_gate::routes::build_router;
-use attest_gate::state::{AppState, ChallengeStore, TrustAnchors, now_unix_secs};
+use attest_gate::routes::{AttestRequest, build_router};
+use attest_gate::state::{AppState, ChallengeStore, TrustAnchors, now_unix_millis, now_unix_secs};
 
 fn generate_test_rsa_pems() -> (String, String) {
     let mut rng = rand::thread_rng();
@@ -278,4 +280,176 @@ fn firebase_custom_jwt_signs_rs256_with_expected_claims() {
 
     // Silence unused import warning if any.
     let _ = IpAddr::V4(Ipv4Addr::LOCALHOST);
+}
+
+#[tokio::test]
+async fn firebase_exchange_custom_token_supports_session_and_limited_use() {
+    let (priv_pem, pub_pem) = generate_test_rsa_pems();
+
+    #[derive(Default)]
+    struct CapturedExchange {
+        auth_headers: Vec<Option<String>>,
+        bodies: Vec<Value>,
+    }
+
+    let captured = Arc::new(Mutex::new(CapturedExchange::default()));
+    let captured_handler = captured.clone();
+
+    let mock_app = Router::new()
+        .route(
+            "/oauth2/token",
+            post(|| async {
+                Json(json!({
+                    "access_token": "mock-oauth2-bearer",
+                    "expires_in": 3600
+                }))
+            }),
+        )
+        .route(
+            "/v1/projects/123456789012/apps/1:123456789012:android:abcdef123456:exchangeCustomToken",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let captured = captured_handler.clone();
+                async move {
+                    let is_limited = body["limitedUse"].as_bool().unwrap_or(false);
+                    let mut guard = captured.lock().await;
+                    guard.auth_headers.push(
+                        headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_owned),
+                    );
+                    guard.bodies.push(body);
+                    if is_limited {
+                        Json(json!({
+                            "token": "mock-limited-use-appcheck-jwt",
+                            "ttl": "300s"
+                        }))
+                    } else {
+                        Json(json!({
+                            "token": "mock-session-appcheck-jwt",
+                            "ttl": "3600s"
+                        }))
+                    }
+                }
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, mock_app).await.unwrap();
+    });
+
+    let mut digests = HashSet::new();
+    digests.insert("a".repeat(64));
+
+    let base_url = format!("http://{addr}");
+    let config = Arc::new(Config {
+        google_application_credentials: PathBuf::from("/tmp/test-sa.json"),
+        service_account: ServiceAccountCredentials {
+            client_email: "attest-gate@demo-project.iam.gserviceaccount.com".into(),
+            private_key: priv_pem,
+            private_key_id: Some("test-kid-1".into()),
+            token_uri: format!("{base_url}/oauth2/token"),
+        },
+        firebase_project_number: "123456789012".into(),
+        firebase_app_id: "1:123456789012:android:abcdef123456".into(),
+        allowed_package_name: "com.example.app".into(),
+        allowed_signing_cert_sha256: digests,
+        allow_grapheneos: true,
+        bind_addr: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
+        rate_limit_rpm: 60,
+        rate_limit_burst: 20,
+        proxy_ip_mode: ProxyIpMode::Direct,
+        firebase_api_base: base_url,
+    });
+
+    let client = FirebaseClient::new(reqwest::Client::new(), config).unwrap();
+
+    // 1. Standard session token (Cloud Firestore, Storage, etc.)
+    let before_session_ms = now_unix_millis();
+    let session_minted = client.exchange_app_check_token(false).await.unwrap();
+    let after_session_ms = now_unix_millis();
+
+    assert_eq!(session_minted.token, "mock-session-appcheck-jwt");
+    assert!(session_minted.expire_time_millis >= before_session_ms + 3_600_000);
+    assert!(session_minted.expire_time_millis <= after_session_ms + 3_600_000 + 1_000);
+
+    // 2. Single-use limited-use token (Firebase AI Logic with replay protection)
+    let before_limited_ms = now_unix_millis();
+    let limited_minted = client.exchange_app_check_token(true).await.unwrap();
+    let after_limited_ms = now_unix_millis();
+
+    assert_eq!(limited_minted.token, "mock-limited-use-appcheck-jwt");
+    assert!(limited_minted.expire_time_millis >= before_limited_ms + 300_000);
+    assert!(limited_minted.expire_time_millis <= after_limited_ms + 300_000 + 1_000);
+
+    let guard = captured.lock().await;
+    assert_eq!(guard.bodies.len(), 2);
+    assert_eq!(
+        guard.auth_headers[0].as_deref(),
+        Some("Bearer mock-oauth2-bearer")
+    );
+    assert_eq!(
+        guard.auth_headers[1].as_deref(),
+        Some("Bearer mock-oauth2-bearer")
+    );
+    assert_eq!(guard.bodies[0]["limitedUse"], json!(false));
+    assert_eq!(guard.bodies[1]["limitedUse"], json!(true));
+
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_audience(&[
+        "https://firebaseappcheck.googleapis.com/google.firebase.appcheck.v1.TokenExchangeService",
+    ]);
+    for body in &guard.bodies {
+        let custom_token = body["customToken"]
+            .as_str()
+            .expect("customToken string present");
+        let decoded = decode::<Value>(
+            custom_token,
+            &DecodingKey::from_rsa_pem(pub_pem.as_bytes()).unwrap(),
+            &validation,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.claims["app_id"],
+            "1:123456789012:android:abcdef123456"
+        );
+    }
+
+    server.abort();
+}
+
+#[test]
+fn attest_request_deserializes_limited_use_default_and_aliases() {
+    let default_req: AttestRequest = serde_json::from_value(json!({
+        "challenge": "abc",
+        "certificate_chain": ["AA=="]
+    }))
+    .unwrap();
+    assert!(!default_req.limited_use);
+
+    let snake_true: AttestRequest = serde_json::from_value(json!({
+        "challenge": "abc",
+        "certificate_chain": ["AA=="],
+        "limited_use": true
+    }))
+    .unwrap();
+    assert!(snake_true.limited_use);
+
+    let camel_true: AttestRequest = serde_json::from_value(json!({
+        "challenge": "abc",
+        "certificate_chain": ["AA=="],
+        "limitedUse": true
+    }))
+    .unwrap();
+    assert!(camel_true.limited_use);
+
+    let explicit_false: AttestRequest = serde_json::from_value(json!({
+        "challenge": "abc",
+        "certificate_chain": ["AA=="],
+        "limited_use": false
+    }))
+    .unwrap();
+    assert!(!explicit_false.limited_use);
 }

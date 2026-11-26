@@ -35,6 +35,11 @@ pub struct ChallengeResponse {
 pub struct AttestRequest {
     pub challenge: String,
     pub certificate_chain: Vec<String>,
+    /// When `true`, requests a single-use limited-use App Check token (`"limitedUse": true`)
+    /// for replay-protected endpoints such as Firebase AI Logic.
+    /// Defaults to `false` (standard session token required by Cloud Firestore, Storage, etc.).
+    #[serde(default, alias = "limitedUse")]
+    pub limited_use: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,12 +126,13 @@ async fn attest(
         security_level = ?verified.security_level,
         boot_state = ?verified.verified_boot_state,
         package = %verified.package_name,
+        limited_use = payload.limited_use,
         "hardware key attestation verified; exchanging Firebase App Check token"
     );
 
     let minted = state
         .firebase
-        .exchange_app_check_token()
+        .exchange_app_check_token(payload.limited_use)
         .await
         .map_err(|err| AppError::Upstream(format!("{err:#}")))?;
 

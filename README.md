@@ -62,7 +62,7 @@ Android / GrapheneOS App (no Play Services)
 | `GET /livez` | Liveness probe (`200 OK` while HTTP runtime is healthy; rate-limit exempt) |
 | `GET /healthz` | Readiness probe (`200 OK` when trust anchors are synced & fresh, `503 Service Unavailable` otherwise; rate-limit exempt) |
 | `POST /v1/challenge` | Issues a single-use 32-byte base64url challenge nonce (`60s` TTL) |
-| `POST /v1/attest` | Verifies hardware key attestation chain + nonce and returns an official Firebase App Check JWT (`3600s` TTL) |
+| `POST /v1/attest` | Verifies hardware key attestation chain + nonce and returns an official Firebase App Check JWT (standard session token by default, or single-use limited-use token when `"limited_use": true`) |
 
 ---
 

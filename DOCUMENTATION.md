@@ -48,7 +48,7 @@ Mobile App (Stock Android or GrapheneOS, no Play Services)
 | `src/sync.rs` | Periodically (every 6h) fetches Google's attestation revocation list (`android.googleapis.com/attestation/status`) and GrapheneOS's OpenSSH-signed verified boot keys (`grapheneos.org/attestation.json` + `.sig`). |
 | `src/state.rs` | Holds the in-memory `ChallengeStore` (`DashMap`), `TrustAnchors` (`RwLock`), and shared `AppState`. |
 | `src/attestation.rs` | Implements the X.509 chain, CRL, and ASN.1 DER `KeyDescription` verification pipeline. |
-| `src/firebase.rs` | Exchanges Service Account RS256 assertions for a cached (50m) Google OAuth2 bearer token and mints official Firebase App Check tokens (`3600s` TTL) via `:exchangeCustomToken`. |
+| `src/firebase.rs` | Exchanges Service Account RS256 assertions for a cached (50m) Google OAuth2 bearer token and mints official Firebase App Check tokens (standard session tokens or single-use limited-use tokens when `"limited_use": true`) via `:exchangeCustomToken`. |
 | `src/rate_limit.rs` | Per-IP token-bucket rate-limiting middleware backed by `DashMap`. |
 | `src/routes.rs` | Axum HTTP router (`GET /livez`, `GET /healthz`, `POST /v1/challenge`, `POST /v1/attest`), 64 KiB body limit, and request tracing. |
 | `src/error.rs` | Maps internal error variants to JSON HTTP responses (`400`, `403`, `429`, `500`, `502`, `503`). |
@@ -78,9 +78,13 @@ Mobile App (Stock Android or GrapheneOS, no Play Services)
      ```json
      {
        "challenge": "<base64url nonce from /v1/challenge>",
-       "certificate_chain": ["<base64 DER leaf>", "<base64 DER intermediate>", "...", "<base64 DER root>"]
+       "certificate_chain": ["<base64 DER leaf>", "<base64 DER intermediate>", "...", "<base64 DER root>"],
+       "limited_use": false
      }
      ```
+     - `limited_use` *(optional boolean, default `false`; also accepts camelCase `limitedUse`)*:
+       - `false` (default): passes `"limitedUse": false` to Firebase `:exchangeCustomToken` to mint a standard session App Check token (`3600s` TTL), required by services such as **Cloud Firestore**, Cloud Storage, and Realtime Database (Cloud Firestore rejects limited-use tokens with HTTP 403).
+       - `true`: passes `"limitedUse": true` to Firebase `:exchangeCustomToken` to mint a single-use limited-use App Check token (`300s` TTL) for replay-protected endpoints such as **Firebase AI Logic** (`useLimitedUseAppCheckTokens: true`) or callable functions/custom backends with replay protection.
    - On success (`200 OK`):
      ```json
      {
@@ -144,9 +148,9 @@ Even with strict cryptographic and runtime hardening, **operational deployment c
 
 ### B. Inherent Threat-Model Boundaries (What This Architecture Cannot Prevent)
 
-1. **Bearer Token Theft & Replay (Up to 1 Hour):**
-   - Firebase App Check tokens are stateless bearer JWTs valid for `3600s` (1 hour) and are **not** cryptographically bound to the device's hardware key (no DPoP/mTLS proof-of-possession).
-   - If an attacker intercepts the token in transit (e.g., missing TLS or an Android app that trusts user-installed MITM CAs) or extracts it from a compromised device, they can replay that JWT from any script or server until it expires.
+1. **Bearer Token Theft & Replay:**
+   - Standard session App Check tokens (`"limited_use": false`, required for Cloud Firestore) are stateless bearer JWTs valid for `3600s` (1 hour) and can be replayed until expiry if stolen.
+   - Limited-use App Check tokens (`"limited_use": true`, used with Firebase AI Logic `useLimitedUseAppCheckTokens: true`) enable Firebase's single-use replay protection, though an unconsumed token intercepted in transit (e.g., missing TLS or an Android app that trusts user-installed MITM CAs) or extracted from a compromised device before first use can still be raced once before it expires. Neither token type is cryptographically bound to the device's hardware key (no DPoP/mTLS proof-of-possession).
 2. **Leaked OEM Keyboxes (Zero-Day / CRL Lag):**
    - Root/spoofing tools (e.g., TrickyStore) can forge hardware attestations using leaked OEM attestation keyboxes until Google adds those certificate serials to `android.googleapis.com/attestation/status`.
    - Because `attest-gate` syncs the CRL every 6 hours, there is an additional exposure window between Google revoking a keybox and `attest-gate` refreshing.
@@ -170,7 +174,9 @@ Even with strict cryptographic and runtime hardening, **operational deployment c
   - Client-side StrongBox EC P-256 key generation + attestation can take ~50–300 ms depending on SoC (TEE is faster).
   - Server-side X.509/ASN.1 verification takes a few milliseconds.
   - Upstream call to Firebase `:exchangeCustomToken` adds ~100–250 ms (OAuth2 bearer token is cached for 50 minutes, avoiding an extra round-trip on most requests).
-- **Frequency:** Because minted App Check tokens live for **1 hour** (`3600s`) and the Firebase App Check SDK caches and refreshes them proactively, each active device typically calls `attest-gate` only **once per hour** (or on cold app start if the cached token expired).
+- **Frequency:**
+  - For standard session tokens (`"limited_use": false`, e.g. Cloud Firestore), minted tokens live for **1 hour** (`3600s`) and are cached/refreshed by the Firebase App Check SDK.
+  - For limited-use tokens (`"limited_use": true`, e.g. Firebase AI Logic with `useLimitedUseAppCheckTokens: true`), the client requests a fresh token per protected API call; size `RATE_LIMIT_RPM` / `RATE_LIMIT_BURST` accordingly for your expected per-IP request volume.
 - **Footprint:** Very low CPU and RAM usage under normal load (tens of megabytes RSS), suitable for small `k3s` clusters.
 
 ### Device & Platform Compatibility Matrix
@@ -195,7 +201,7 @@ Even with strict cryptographic and runtime hardening, **operational deployment c
 
 ## 6. Potential Shortcomings & Operational Risks
 
-1. **Single Point of Failure (`replicas: 1`):** Running a single replica means pod restarts, node drains, or OOM events cause brief attestation outages (though already-minted 1-hour App Check tokens continue working on clients during short outages).
+1. **Single Point of Failure (`replicas: 1`):** Running a single replica means pod restarts, node drains, or OOM events cause brief attestation outages (already-minted 1-hour session tokens continue working during short outages, while limited-use token callers need a fresh attestation for each new request).
 2. **48-Hour Fail-Closed Ceiling on Extended Upstream Outages:** If Google's CRL endpoint is unreachable for more than 48 consecutive hours, `attest-gate` intentionally fails closed (`503`) to avoid accepting revoked keyboxes indefinitely.
 3. **Single App per Deployment:** `FIREBASE_APP_ID`, `ALLOWED_PACKAGE_NAME`, and `ALLOWED_SIGNING_CERT_SHA256` support only one Android app per `attest-gate` instance.
 4. **No OS Security Patch / Version Floor or App Version Floor:** `osVersion`, `osPatchLevel`, `bootPatchLevel`, `vendorPatchLevel`, `origin`, and APK `versionCode` are not validated, so outdated/vulnerable OS images and older APK versions signed with the same release key remain accepted indefinitely.

@@ -47,7 +47,7 @@ Instead, report vulnerabilities privately using one of the following channels:
 
 ### Out of Scope (Inherent Architecture Boundaries)
 The following are documented threat-model boundaries of hardware key attestation and Firebase App Check rather than bugs in `attest-gate` (see [DOCUMENTATION.md](DOCUMENTATION.md) for details):
-- Replay of an already-minted 1-hour Firebase App Check bearer JWT stolen from a compromised device or intercepted over misconfigured non-TLS transport.
+- Replay of an already-minted Firebase App Check session bearer JWT (or single-use race of an unconsumed limited-use JWT) stolen from a compromised device or intercepted over misconfigured non-TLS transport (App Check tokens are not DPoP/mTLS-bound).
 - Attestation forgery using a leaked OEM attestation keybox that has **not yet** been revoked in Google's `android.googleapis.com/attestation/status` feed (or within the normal 6-hour CRL refresh window).
 - Relaying challenges to a farm of physical, bootloader-locked devices running the unmodified release APK.
 - Automation or quota abuse from a genuine, locked device running the genuine APK (mitigate with Firebase Auth, server-side user quotas, and billing alerts).
