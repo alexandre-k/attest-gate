@@ -43,6 +43,11 @@ jobs:
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.TAG }}
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=v${{ steps.vars.outputs.TAG }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}/releases/tag/v${{ steps.vars.outputs.TAG }} 
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
