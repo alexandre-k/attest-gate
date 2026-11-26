@@ -7,7 +7,10 @@ on:
     branches: [ "master" ]
 
 permissions:
-  contents: write
+  contents: write  # Create GitHub Releases and upload assets
+
+env:
+  IMAGE_NAME: attest-gate
 
 jobs:
   build:
@@ -38,16 +41,16 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           load: ${{ github.event_name != 'pull_request' }}
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/attest-gate:${{ steps.vars.outputs.TAG }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/attest-gate:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.TAG }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Export and compress Docker image
         if: github.event_name != 'pull_request'
         run: |
-          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/attest-gate:${{ steps.vars.outputs.TAG }}"
-          docker save "$IMAGE" | gzip > "attest-gate-${{ steps.vars.outputs.TAG }}.tar.gz"
+          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.TAG }}"
+          docker save "$IMAGE" | gzip > "${{ env.IMAGE_NAME }}-${{ steps.vars.outputs.TAG }}.tar.gz"
 
       - name: Create GitHub Release
         if: github.event_name != 'pull_request'
@@ -55,5 +58,10 @@ jobs:
         with:
           tag_name: v${{ steps.vars.outputs.TAG }}
           name: Release v${{ steps.vars.outputs.TAG }}
-          files: attest-gate-${{ steps.vars.outputs.TAG }}.tar.gz
+          files: ${{ env.IMAGE_NAME }}-${{ steps.vars.outputs.TAG }}.tar.gz
           generate_release_notes: true
+          body: |
+            ### Docker Pull Command
+            ```bash
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.TAG }}
+            ```
