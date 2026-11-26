@@ -1,3 +1,6 @@
+[![Rust](https://github.com/alexandre-k/attest-gate/actions/workflows/rust.yml/badge.svg)](https://github.com/alexandre-k/attest-gate/actions/workflows/rust.yml)
+[![Container](https://github.com/alexandre-k/attest-gate/actions/workflows/docker-image.yml/badge.svg)](https://github.com/alexandre-k/attest-gate/actions/workflows/docker-image.yml)
+
 # `attest-gate`
 
 Self-hosted Rust microservice that replaces **Google Play Integrity** with **Android Hardware Key Attestation** (supporting both **stock Android** and **GrapheneOS**) and mints official **Firebase App Check** JWTs for **Firebase AI Logic (Gemini / Vertex AI in Firebase)**—with zero dependency on Google Play Services or the Play Store.
